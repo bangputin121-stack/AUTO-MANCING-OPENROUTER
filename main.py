@@ -300,23 +300,26 @@ def match_answer(ai_answer: str, choices: list) -> str | None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Parser: ekstrak teks soal & button dari pesan
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def extract_question_and_choices(message: Message) -> tuple[str, list]:
+def extract_question_and_choices(message: Message):
     """
-    Kembalikan (teks_soal, list_pilihan_dari_button).
-    Kalau tidak ada button, choices = [].
+    Kembalikan (teks_soal, list_button_objects, list_teks_pilihan).
+    button_objects diperlukan untuk request_callback (klik button).
     """
     text = (message.text or "") + (message.caption or "")
 
-    choices = []
+    buttons     = []  # object button asli (untuk di-klik)
+    choices_txt = []  # teks dari button (untuk dikirim ke AI)
+
     if message.reply_markup:
         try:
             for row in message.reply_markup.inline_keyboard:
                 for btn in row:
-                    choices.append(btn.text.strip())
+                    buttons.append(btn)
+                    choices_txt.append(btn.text.strip())
         except Exception:
             pass
 
-    return text.strip(), choices
+    return text.strip(), buttons, choices_txt
 
 
 def is_captcha(text: str) -> bool:
@@ -331,7 +334,39 @@ def is_captcha(text: str) -> bool:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Helper: kirim pesan aman (handle FloodWait)
+#  Helper: klik inline button (cara benar jawab captcha)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async def click_button(client: Client, message: Message, btn_text: str, buttons: list) -> bool:
+    """
+    Cari button dengan teks = btn_text lalu klik (request_callback).
+    Return True kalau berhasil, False kalau gagal.
+    """
+    # Cari button yang cocok (exact atau strip)
+    target_btn = None
+    for btn in buttons:
+        if btn.text.strip() == btn_text.strip():
+            target_btn = btn
+            break
+
+    if not target_btn:
+        log("CLICK", f"⚠️ Button '{btn_text}' tidak ditemukan di markup")
+        return False
+
+    try:
+        await client.request_callback_answer(
+            chat_id    = message.chat.id,
+            message_id = message.id,
+            callback_data = target_btn.callback_data
+        )
+        log("CLICK", f"✅ Berhasil klik button: '{btn_text}'")
+        return True
+    except Exception as e:
+        log("CLICK", f"❌ Gagal klik button: {e}")
+        return False
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Helper: kirim pesan teks aman (handle FloodWait)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async def safe_send(client: Client, chat_id, text: str):
     try:
@@ -349,12 +384,12 @@ async def safe_send(client: Client, chat_id, text: str):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @app.on_message(filters.chat(FISHING_BOT))
 async def handle_bot_msg(client: Client, message: Message):
-    question, choices = extract_question_and_choices(message)
+    question, buttons, choices = extract_question_and_choices(message)
 
     # ── Captcha terdeteksi ──────────────────────────────────
     if is_captcha(question):
         log("CAPTCHA", f"🚨 Captcha terdeteksi!")
-        log("CAPTCHA", f"📝 Soal: {question[:100]}")
+        log("CAPTCHA", f"📝 Soal: {question[:120]}")
         log("CAPTCHA", f"🔘 Pilihan: {choices}")
 
         # Download foto kalau ada (untuk captcha gambar/emoji)
@@ -368,37 +403,48 @@ async def handle_bot_msg(client: Client, message: Message):
             except Exception as e:
                 log("CAPTCHA", f"⚠️ Gagal download foto: {e}")
 
-        # Kalau tidak ada pilihan dari button, coba parse dari teks
+        # Kalau tidak ada button sama sekali, coba parse angka dari teks
         if not choices:
             log("CAPTCHA", "⚠️ Tidak ada inline button, parse dari teks...")
-            numbers = re.findall(r'\b\d+\b', question)
+            numbers = re.findall(r"\d+", question)
             if numbers:
-                choices = numbers[-4:]  # ambil 4 angka terakhir sebagai pilihan
+                choices = numbers[-4:]
 
         answer = None
 
-        # ── STEP 1: Coba selesaikan matematika pakai Python dulu (instant, gratis) ──
+        # ── STEP 1: Python math solver (instant, tanpa AI) ──
         is_math_question = any(k in question.lower() for k in [
-            "berapa hasil", "hitung", "hasil dari", "+ ", "- ", "x ", "kali",
-            "dibagi", "kurang", "tambah", "= ?", "=?", "pangkat", "akar", "kuadrat", "mod"
+            "berapa hasil", "hitung", "hasil dari", "tambah", "kurang",
+            "kali", "bagi", "pangkat", "akar", "kuadrat", "mod", "sisa",
+            "+ ", "- ", "x ", "× ", "÷ ", "= ?", "=?"
         ])
         if not img_b64 and is_math_question:
-            log("MATH", "🧮 Coba selesaikan pakai Python solver...")
+            log("MATH", "🧮 Coba Python solver...")
             answer = solve_math(question, choices)
             if answer:
-                log("MATH", f"✅ Python solver berhasil: '{answer}' (hemat token AI!)")
+                log("MATH", f"✅ Python solver: '{answer}'")
 
-        # ── STEP 2: Fallback ke OpenRouter AI kalau math solver gagal / ada gambar ──
+        # ── STEP 2: OpenRouter AI (untuk emoji, gambar, pola) ──
         if not answer:
             log("AI", "🤖 Kirim ke OpenRouter AI...")
             answer = await call_openrouter(question, choices, img_b64)
 
-        if answer:
-            log("CAPTCHA", f"📤 Kirim jawaban: '{answer}'")
-            await asyncio.sleep(1.5)  # delay biar kelihatan manusiawi
-            await safe_send(client, FISHING_BOT, answer)
+        if not answer:
+            log("CAPTCHA", "❌ Tidak bisa jawab captcha!")
+            return
+
+        log("CAPTCHA", f"💡 Jawaban: '{answer}'")
+        await asyncio.sleep(1.5)
+
+        # ── STEP 3: Klik button kalau ada, fallback kirim teks ──
+        if buttons:
+            clicked = await click_button(client, message, answer, buttons)
+            if not clicked:
+                # Kalau klik gagal, kirim teks sebagai fallback
+                log("CAPTCHA", "⚠️ Klik gagal, kirim teks sebagai fallback...")
+                await safe_send(client, FISHING_BOT, answer)
         else:
-            log("CAPTCHA", "❌ AI tidak bisa jawab captcha ini!")
+            await safe_send(client, FISHING_BOT, answer)
         return
 
     # ── Hasil mancing ──────────────────────────────────────
@@ -410,7 +456,7 @@ async def handle_bot_msg(client: Client, message: Message):
         log("HASIL", f"🐟 Dapat: {fish_name} {flag}")
         return
 
-    # ── Pesan lain (opsional log) ───────────────────────────
+    # ── Pesan lain ─────────────────────────────────────────
     if question:
         log("MSG", question[:80])
 
