@@ -61,25 +61,147 @@ def log(tag: str, msg: str):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  OpenRouter AI — jawab captcha
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SYSTEM_PROMPT = """Kamu adalah solver captcha Telegram otomatis.
+SYSTEM_PROMPT = """Kamu adalah solver captcha Telegram otomatis untuk bot mancing.
 
 Tugasmu: jawab captcha dengan TEPAT sesuai pilihan yang tersedia.
 
 Aturan penting:
 1. Jawab HANYA dengan teks/angka yang persis sama dengan salah satu pilihan.
-2. JANGAN tambah kata lain, tanda baca, atau penjelasan.
+2. JANGAN tambah kata lain, tanda baca, spasi, atau penjelasan apapun.
 3. Kalau captcha berupa gambar emoji, hitung jumlahnya dan pilih angka yang sesuai.
-4. Kalau suruh pilih emoji ikan, jawab dengan emoji ikannya saja (contoh: 🐟 atau 🎣).
-5. Kalau matematika, hitung dan pilih jawabannya.
-6. Kalau pola angka, lanjutkan polanya dan pilih jawabannya.
+4. Kalau pola angka, lanjutkan polanya lalu pilih angka yang cocok.
+5. Kalau suruh "pilih emoji IKAN" atau "pilih hewan air/laut", pilih emoji yang merupakan
+   hewan yang hidup di air (laut, sungai, danau, dll).
 
-Contoh:
-- Pertanyaan: "Hitung berapa ikan: 🐟🐟🐟" | Pilihan: [3, 5, 6, 4] → Jawab: 3
-- Pertanyaan: "Pilih emoji IKAN yang benar" | Pilihan: [🌸, 🐟, 🎮, ⚽] → Jawab: 🐟
-- Pertanyaan: "10 + 12 = ?" | Pilihan: [21, 24, 22, 23] → Jawab: 22
-- Pertanyaan: "2, 4, 6, 8, __?" | Pilihan: [11, 8, 10, 14] → Jawab: 10
+Daftar emoji HEWAN AIR / LAUT yang valid (pilih salah satu dari pilihan kalau ada ini):
+🐟 🐠 🐡 🦈 🐙 🦑 🦐 🦞 🦀 🐚 🐋 🐳 🐬 🐊 🐢 🦦 🦭 🫧 🎣 🐸 🐍 🦎
+(hewan yang hidup di air, sungai, laut, rawa — semua termasuk)
+
+Emoji yang BUKAN hewan air (jangan pilih ini untuk captcha hewan air):
+🌸 🌺 🌻 🌹 🍀 🎮 ⚽ 🏀 🎱 🎯 🎪 🎭 🚗 🚀 ✈️ 🏠 💻 📱 🎸 🎵
+(bunga, bola, kendaraan, teknologi, dll)
+
+Contoh jawaban:
+- "Hitung berapa ikan: 🐟🐟🐟" | Pilihan: [3, 5, 6, 4] → Jawab: 3
+- "Pilih emoji IKAN yang benar" | Pilihan: [🌸, 🐙, 🎮, ⚽] → Jawab: 🐙
+- "Pilih emoji IKAN yang benar" | Pilihan: [🌻, 🎯, 🦑, 🏀] → Jawab: 🦑
+- "Pilih emoji IKAN yang benar" | Pilihan: [🐊, 🌸, 🎮, 🎱] → Jawab: 🐊
+- "Pilih emoji IKAN yang benar" | Pilihan: [🎭, 🐢, 🚗, 🌹] → Jawab: 🐢
+- "2, 4, 6, 8, __?" | Pilihan: [11, 8, 10, 14] → Jawab: 10
 """
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Python Math Solver — hitung sendiri tanpa AI
+#  Support semua variasi:
+#    Simbol  : + - × ÷ ^ √ ² ³ % mod
+#    Kata ID : tambah, kurang, kali, dibagi, pangkat, akar, mod, sisa
+#    Bertingkat: (3+4)×2 - 1
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def normalize_math(text: str) -> str:
+    """
+    Ubah teks soal matematika (semua format) → ekspresi Python.
+    Urutan penggantian SANGAT PENTING — jangan ubah urutannya!
+    """
+    expr = text.strip()
+
+    # ── 1. Kata-kata Indonesia → operator (HARUS sebelum potong prefix) ──
+    word_ops = [
+        # kata lebih panjang dulu agar tidak bentrok
+        (r'\bdikurang(?:i)?\b',   '-'),
+        (r'\bditambah(?:i)?\b',   '+'),
+        (r'\bdibagi\b',           '/'),
+        (r'\bdikali\b',           '*'),
+        (r'\bpangkat\b',          '**'),
+        (r'\bkuadrat\b',          '**2'),
+        (r'\bkubik\b',            '**3'),
+        (r'\bmodulo\b',           '%'),
+        (r'\bmod\b',              '%'),
+        (r'\bsisa\b',             '%'),
+        (r'\btambah\b',           '+'),
+        (r'\bkurang\b',           '-'),
+        (r'\bkali\b',             '*'),
+        (r'\bbagi\b',             '/'),
+    ]
+    for pattern, repl in word_ops:
+        expr = re.sub(pattern, repl, expr, flags=re.IGNORECASE)
+
+    # ── 2. Akar sebelum cleanup (supaya angka di dalam tidak hilang) ──
+    # "akar(9+16)" → "((9+16)**0.5)"
+    expr = re.sub(r'akar\s*\(([^)]+)\)', r'((\1)**0.5)', expr, flags=re.IGNORECASE)
+    # "akar 144" atau "akar144" → "(144**0.5)"
+    expr = re.sub(r'akar\s*(\d+)', r'(\1**0.5)', expr, flags=re.IGNORECASE)
+    # "√(9+16)" → "((9+16)**0.5)"
+    expr = re.sub(r'√\(([^)]+)\)', r'((\1)**0.5)', expr)
+    # "√144" → "(144**0.5)"
+    expr = re.sub(r'√(\d+)', r'(\1**0.5)', expr)
+
+    # ── 3. Simbol matematika → Python ──
+    symbol_ops = [
+        (r'[×xX]',           '*'),     # × x X → *
+        (r'[÷]',             '/'),     # ÷ → /
+        (r'²',               '**2'),   # superscript kuadrat
+        (r'³',               '**3'),   # superscript kubik
+        (r'(?<!\*)\^(?!\*)', '**'),    # ^ → ** (kalau belum jadi **)
+    ]
+    for pattern, repl in symbol_ops:
+        expr = re.sub(pattern, repl, expr)
+
+    # ── 4. Hapus teks non-math di DEPAN ("Berapa hasil dari:", dll) ──
+    # Cari digit / kurung / % pertama
+    m = re.search(r'[\d\(%\(]', expr)
+    if m:
+        expr = expr[m.start():]
+
+    # ── 5. Hapus "= ?" dan teks sisa, tapi JAGA operator %, *, /, +, - ──
+    expr = re.sub(r'[=?]', '', expr)
+    # Hanya izinkan: angka, operator, titik desimal, spasi, kurung
+    expr = re.sub(r'[^0-9\+\-\*\/\%\.\(\)\s]', '', expr)
+    expr = expr.strip()
+
+    return expr
+
+
+def solve_math(text: str, choices: list) -> str | None:
+    """
+    Selesaikan soal matematika dari teks.
+    Return string pilihan yang cocok, atau None kalau gagal.
+
+    Didukung:
+      Simbol   : 10+12, 6×9, 100÷4, 2^5, √144, 3²
+      Kata ID  : tambah, kurang, kali, bagi, pangkat, akar, mod, sisa
+      Bertingkat: (3+4)×2-1, akar(9+16), 50-(3×7)
+    """
+    if not re.search(r'\d', text):
+        return None
+
+    expr = normalize_math(text)
+    log("MATH", f"🧮 Expr: '{expr}'")
+
+    if not expr or not re.search(r'\d', expr):
+        return None
+
+    try:
+        result      = eval(expr, {"__builtins__": {}})
+        result_float = float(result)
+        result_int   = int(round(result_float))
+
+        log("MATH", f"🧮 Hasil: {result_float}")
+
+        for ch in choices:
+            ch_str = str(ch).strip()
+            try:
+                if abs(float(ch_str) - result_float) < 0.01:
+                    return ch_str
+            except ValueError:
+                pass
+            if ch_str == str(result_int):
+                return ch_str
+
+    except Exception as e:
+        log("MATH", f"⚠️ Gagal eval '{expr}': {e}")
+
+    return None
 async def call_openrouter(prompt: str, choices: list, img_base64: str = None) -> str | None:
     """
     Panggil OpenRouter untuk jawab captcha.
@@ -253,8 +375,23 @@ async def handle_bot_msg(client: Client, message: Message):
             if numbers:
                 choices = numbers[-4:]  # ambil 4 angka terakhir sebagai pilihan
 
-        # Tanya ke OpenRouter
-        answer = await call_openrouter(question, choices, img_b64)
+        answer = None
+
+        # ── STEP 1: Coba selesaikan matematika pakai Python dulu (instant, gratis) ──
+        is_math_question = any(k in question.lower() for k in [
+            "berapa hasil", "hitung", "hasil dari", "+ ", "- ", "x ", "kali",
+            "dibagi", "kurang", "tambah", "= ?", "=?", "pangkat", "akar", "kuadrat", "mod"
+        ])
+        if not img_b64 and is_math_question:
+            log("MATH", "🧮 Coba selesaikan pakai Python solver...")
+            answer = solve_math(question, choices)
+            if answer:
+                log("MATH", f"✅ Python solver berhasil: '{answer}' (hemat token AI!)")
+
+        # ── STEP 2: Fallback ke OpenRouter AI kalau math solver gagal / ada gambar ──
+        if not answer:
+            log("AI", "🤖 Kirim ke OpenRouter AI...")
+            answer = await call_openrouter(question, choices, img_b64)
 
         if answer:
             log("CAPTCHA", f"📤 Kirim jawaban: '{answer}'")
