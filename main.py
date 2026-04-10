@@ -380,10 +380,30 @@ async def safe_send(client: Client, chat_id, text: str):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Handler utama pesan dari fishing bot
+#  Handler utama — tangkap SEMUA pesan masuk
+#  lalu filter manual berdasarkan username/id
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-@app.on_message(filters.chat(FISHING_BOT))
+@app.on_message(filters.incoming & ~filters.me)
 async def handle_bot_msg(client: Client, message: Message):
+    # Log semua pengirim biar ketahuan username/id-nya
+    sender = message.from_user or message.sender_chat
+    sender_username = getattr(sender, "username", None) or ""
+    sender_id       = getattr(sender, "id", 0)
+    chat_username   = getattr(message.chat, "username", None) or ""
+    chat_id         = message.chat.id
+
+    log("RAW", f"Dari: @{sender_username} (id:{sender_id}) | chat: @{chat_username} (id:{chat_id})")
+
+    # Filter: hanya proses kalau dari fishing bot
+    is_from_bot = (
+        sender_username.lower() == FISHING_BOT.lower()
+        or chat_username.lower() == FISHING_BOT.lower()
+        or str(sender_id) == FISHING_BOT
+        or str(chat_id)   == FISHING_BOT
+    )
+    if not is_from_bot:
+        return
+
     question, buttons, choices = extract_question_and_choices(message)
 
     # ── Captcha terdeteksi ──────────────────────────────────
